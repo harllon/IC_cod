@@ -1,0 +1,117 @@
+#include <vector>
+#include <iostream>
+#include "caffe/layers/shiftFeat_layer.hpp"
+
+namespace caffe {
+
+template<typename Dtype>
+__device__ inline Dtype getvalue(const Dtype* V, int x, int y, int c, int n, int C, int W, int H) {
+	if ( x < 0 || x > W - 1 || y < 0 || y > H - 1 || c < 0 || c > C - 1) 
+		return 0;	
+	return V[((n*C+c)*H+y)*W+x];
+}
+
+template<typename Dtype>
+__device__ inline void addvalue(Dtype* V, int x, int y, int c, int n, int C, int W, int H, Dtype v) {
+	if ( x < 0 || x > W - 1 || y < 0 || y > H - 1 || c < 0 || c > C - 1) 
+		return;
+	V[((n*C+c)*H+y)*W+x] += v;
+}
+
+
+template <typename Dtype>
+__global__ void ShiftForward(const int nthreads,
+	const Dtype* Vb, const int uv_size,
+	const Dtype* omega_u, const Dtype* omega_v,
+	Dtype* const feat,
+	const int C, const int H, const int W,
+	const int res, const float step) {
+
+	const Dtype rgb2gray[3] = { 0.2989, 0.5870, 0.1140 };
+	//const int uv_size = uv_dia * uv_dia;
+
+    // nthreads = N * res * H * W
+	CUDA_KERNEL_LOOP(index, nthreads) {
+		const int n = index / W / H / res;
+		const int s = (index / W / H) % res;
+		const int h = (index / W) % H;
+		const int w = index % W;
+		int mean_index = ((n*res*2+s)*H+h)*W+w;
+		int var_index = ((n*res*2+res+s)*H+h)*W+w;
+
+		Dtype shift = (s - Dtype(res-1)/2) * step;
+		Dtype x, y, wx, wy, w00, w01, w10, w11, v00, v01, v10, v11, sum;
+		int u, v, x0, y0, x1, y1;
+		for ( int uv = 0; uv < uv_size; uv++) {
+			//v = uv / uv_dia - (uv_dia-1)/2;
+			//u = uv % uv_dia - (uv_dia-1)/2;
+			v = omega_v[n*uv_size+uv];
+			u = omega_u[n*uv_size+uv];
+
+			x = w + shift * u;
+			y = h + shift * v;
+			x0 = floor(x); x1 = x0 + 1; wx = x1 - x;
+			y0 = floor(y); y1 = y0 + 1; wy = y1 - y;
+			w00 = (1 - wx) * (1 - wy); w01 = (1 - wx) * wy; w10 = wx * (1 - wy); w11 = wx * wy;
+
+			sum = 0;
+			for (int c = 0; c < C; c++) {
+				v00 = getvalue(Vb, x0, y0, c+uv*C, n, C*uv_size, W, H);
+				v01 = getvalue(Vb, x0, y1, c+uv*C, n, C*uv_size, W, H);
+				v10 = getvalue(Vb, x1, y0, c+uv*C, n, C*uv_size, W, H);
+				v11 = getvalue(Vb, x1, y1, c+uv*C, n, C*uv_size, W, H);
+				sum += rgb2gray[c] * (w00 * v00 + w01 * v01 + w10 * v10 + w11 * v11);
+			}
+			//mean[index] += sum;
+			//var[index] += sum*sum;
+			feat[mean_index] += sum;
+			feat[var_index] += sum*sum;
+		}
+
+		/*mean[index] /= uv_size;
+		var[index] /= uv_size;
+		var[index] -= mean[index] * mean[index];
+		var[index] = sqrt(var[index]);*/
+		feat[mean_index] /= uv_size;
+		feat[var_index] /= uv_size;
+		feat[var_index] -= feat[mean_index] * feat[mean_index];
+		feat[var_index] = sqrt(feat[var_index]);
+	}
+}
+
+template <typename Dtype>
+void ShiftFeatLayer<Dtype>::Forward_gpu(const vector<Blob<Dtype>*>& bottom,
+    								const vector<Blob<Dtype>*>& top) {
+
+	const int uv_size = bottom[0]->channels() / 3;
+	//const int uv_dia = sqrt(uv_size);
+
+	const Dtype* Vb = bottom[0]->gpu_data();
+	const Dtype* omega_u = bottom[1]->gpu_data();
+	const Dtype* omega_v = bottom[2]->gpu_data();
+	//Dtype* mean = top[0]->mutable_gpu_data();
+	//Dtype* var = top[1]->mutable_gpu_data();
+	Dtype* feat = top[0]->mutable_gpu_data();
+	int N  = bottom[0]->num();
+	int C  = 3;
+	int W = bottom[0]->width();
+	int H = bottom[0]->height();
+
+	//caffe_gpu_set(top[0]->count(), Dtype(0), mean);
+	//caffe_gpu_set(top[1]->count(), Dtype(0), var);
+	caffe_gpu_set(top[0]->count(), Dtype(0), feat);
+	int count = N * res * H * W;
+	ShiftForward<Dtype><<<CAFFE_GET_BLOCKS(count), CAFFE_CUDA_NUM_THREADS>>>(
+        count, Vb, uv_size, omega_u, omega_v, feat, C, H, W, res, step);
+}
+
+template <typename Dtype>
+void ShiftFeatLayer<Dtype>::Backward_gpu(const vector<Blob<Dtype>*>& top,
+    								const vector<bool>& propagate_down,
+    								const vector<Blob<Dtype>*>& bottom) {
+
+}
+
+INSTANTIATE_LAYER_GPU_FUNCS(ShiftFeatLayer);
+
+}  // namespace caffe

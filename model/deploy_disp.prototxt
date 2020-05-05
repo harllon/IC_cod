@@ -1,0 +1,150 @@
+input: "LF"
+input_dim: 1 input_dim: 192 input_dim: 352 input_dim: 512
+input: "ang_u"
+input_dim: 1 input_dim: 64 input_dim: 1 input_dim: 1
+input: "ang_v"
+input_dim: 1 input_dim: 64 input_dim: 1 input_dim: 1
+
+layer {
+  name: "ShiftFeat1"
+  type: "ShiftFeat"
+  bottom: "LF"
+  bottom: "ang_u"
+  bottom: "ang_v"
+  top: "ShiftFeat1"
+  shift_param {
+    dim: 1
+    res: 100
+    step: 0.2
+  }
+}
+layer {
+  name: "Convolution126"
+  type: "Convolution"
+  bottom: "ShiftFeat1"
+  top: "Convolution126"
+  param {
+    name: "conv1f_w"
+    lr_mult: 1
+    decay_mult: 1
+  }
+  param {
+    name: "conv1f_b"
+    lr_mult: 2
+    decay_mult: 0
+  }
+  convolution_param {
+    num_output: 128
+    pad: 3
+    kernel_size: 7
+    weight_filler {
+      type: "msra"
+    }
+    bias_filler {
+      type: "constant"
+      value: 0
+    }
+  }
+}
+layer {
+  name: "ReLU1"
+  type: "ReLU"
+  bottom: "Convolution126"
+  top: "Convolution126"
+}
+layer {
+  name: "Convolution127"
+  type: "Convolution"
+  bottom: "Convolution126"
+  top: "Convolution127"
+  param {
+    name: "conv2f_w"
+    lr_mult: 1
+    decay_mult: 1
+  }
+  param {
+    name: "conv2f_b"
+    lr_mult: 2
+    decay_mult: 0
+  }
+  convolution_param {
+    num_output: 64
+    pad: 2
+    kernel_size: 5
+    weight_filler {
+      type: "msra"
+    }
+    bias_filler {
+      type: "constant"
+      value: 0
+    }
+  }
+}
+layer {
+  name: "ReLU2"
+  type: "ReLU"
+  bottom: "Convolution127"
+  top: "Convolution127"
+}
+layer {
+  name: "Convolution128"
+  type: "Convolution"
+  bottom: "Convolution127"
+  top: "Convolution128"
+  param {
+    name: "conv3f_w"
+    lr_mult: 1
+    decay_mult: 1
+  }
+  param {
+    name: "conv3f_b"
+    lr_mult: 2
+    decay_mult: 0
+  }
+  convolution_param {
+    num_output: 32
+    pad: 1
+    kernel_size: 3
+    weight_filler {
+      type: "msra"
+    }
+    bias_filler {
+      type: "constant"
+      value: 0
+    }
+  }
+}
+layer {
+  name: "ReLU3"
+  type: "ReLU"
+  bottom: "Convolution128"
+  top: "Convolution128"
+}
+layer {
+  name: "disp_LToLc"
+  type: "Convolution"
+  bottom: "Convolution128"
+  top: "disp_LToLc"
+  param {
+    name: "conv4f_w"
+    lr_mult: 1
+    decay_mult: 1
+  }
+  param {
+    name: "conv4f_b"
+    lr_mult: 2
+    decay_mult: 0
+  }
+  convolution_param {
+    num_output: 1
+    pad: 0
+    kernel_size: 1
+    weight_filler {
+      type: "msra"
+    }
+    bias_filler {
+      type: "constant"
+      value: 0
+    }
+  }
+}

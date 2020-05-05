@@ -1,0 +1,228 @@
+#include <vector>
+#include <iostream>
+#include "caffe/layers/remap_layer.hpp"
+#include <curand.h>
+#include <curand_kernel.h>
+
+namespace caffe {
+
+template<typename Dtype>
+__device__ inline Dtype getvalue(Dtype* V, int x, int y, int c, int n, int C, int W, int H) {
+	//if ( x < 0 || x > W - 1 || y < 0 || y > H - 1 || c < 0 || c > C - 1) 
+	//	return 0;	
+	x = max(0, min(W-1, x));
+	y = max(0, min(H-1, y));
+	c = max(0, min(C-1, c));
+	return V[((n*C+c)*H+y)*W+x];
+}
+
+template<typename Dtype>
+__device__ inline void addvalue(Dtype* V, int x, int y, int c, int n, int C, int W, int H, Dtype v) {
+	if ( x < 0 || x > W - 1 || y < 0 || y > H - 1 || c < 0 || c > C - 1) 
+		return;
+	V[((n*C+c)*H+y)*W+x] += v;
+}
+
+template<typename Dtype>
+__device__ inline Dtype cubicInterpolate (Dtype p[], Dtype x) {
+	return p[1] + 0.5 * x*(p[2] - p[0] + x*(2.0*p[0] - 5.0*p[1] + 4.0*p[2] - p[3] + x*(3.0*(p[1] - p[2]) + p[3] - p[0])));
+}
+
+
+template <typename Dtype>
+__global__ void RemapForward(const int nthreads,
+	const Dtype* const Vb, const Dtype* const coords, 
+	const Dtype* const delta, Dtype* const Vt,
+	const int C, const int H0, const int H1,
+	const int W0, const int W1, bool cubic) {
+    
+   // nthreads = N * C * H1 * W1
+	CUDA_KERNEL_LOOP(index, nthreads) {
+		const int n = index / W1 / H1 / C;
+		const int c = (index / W1 / H1) % C;
+		const int h = (index / W1) % H1;
+		const int w = index % W1;
+		Dtype x = w + coords[((n*2+0)*H1+h)*W1+w] * delta[n];
+		Dtype y = h + coords[((n*2+1)*H1+h)*W1+w] * delta[n];
+		if (!cubic) {
+			int x0 = floor(x); int x1 = x0 + 1; Dtype wx = x - x0;
+			int y0 = floor(y); int y1 = y0 + 1; Dtype wy = y - y0;		
+			Dtype w00 = (1 - wx) * (1 - wy), w01 = (1 - wx) * wy, w10 = wx * (1 - wy), w11 = wx * wy;
+			Dtype v00 = getvalue(Vb, x0, y0, c, n, C, W0, H0);
+			Dtype v01 = getvalue(Vb, x0, y1, c, n, C, W0, H0);
+			Dtype v10 = getvalue(Vb, x1, y0, c, n, C, W0, H0);
+			Dtype v11 = getvalue(Vb, x1, y1, c, n, C, W0, H0);
+			Vt[index] = w00 * v00 + w01 * v01 + w10 * v10 + w11 * v11;
+		}
+		else {
+			Dtype v[4][4];
+			int x0 = floor(x);
+			int y0 = floor(y);
+			for (int i = -1; i <= 2; i++) {
+				for (int j = -1; j <= 2; j++) {
+					v[i+1][j+1] = getvalue(Vb, x0+j, y0+i, c, n, C, W0, H0);
+				}
+			}
+			Dtype arr[4];
+			for (int i = 0; i < 4; i++)
+				arr[i] = cubicInterpolate(v[i], x-x0);
+			Vt[index] = cubicInterpolate(arr, y-y0);
+		}
+	} 
+}
+
+template <typename Dtype>
+void RemapLayer<Dtype>::Forward_gpu(const vector<Blob<Dtype>*>& bottom,
+    								const vector<Blob<Dtype>*>& top) {
+	const Dtype* Vb = bottom[0]->gpu_data();
+	const Dtype* coords = bottom[1]->gpu_data();
+	const Dtype* delta = bottom[2]->gpu_data();
+	Dtype* Vt = top[0]->mutable_gpu_data();
+	int N  = bottom[0]->num();
+	int C  = bottom[0]->channels();
+	int W0 = bottom[0]->width();
+	int H0 = bottom[0]->height();
+	int W1 = bottom[1]->width();
+	int H1 = bottom[1]->height();	
+
+	int count = N * C * H1 * W1;
+	bool cubic = this->layer_param().remap_param().type() == RemapParameter_RemapType_CUBIC;
+	RemapForward<Dtype><<<CAFFE_GET_BLOCKS(count), CAFFE_CUDA_NUM_THREADS>>>(
+      	count, Vb, coords, delta, Vt, C, H0, H1, W0, W1, cubic);
+}
+
+template <typename Dtype>
+__global__ void RemapBackwardValue(const int nthreads,
+const Dtype* const coords, const Dtype* const delta,
+const Dtype* const top_diff, Dtype* const b0_diff,
+const int C, const int H0, const int H1,
+const int W0, const int W1) {
+	// nthreads = N * C * H1 * W1
+	CUDA_KERNEL_LOOP(index, nthreads) {
+		const int n = index / W1 / H1 / C;
+		const int c = (index / W1 / H1) % C;
+      const int h = (index / W1) % H1;
+      const int w = index % W1;
+
+      Dtype x = w + coords[((n*2+0)*H1+h)*W1+w] * delta[n];
+      Dtype y = h + coords[((n*2+1)*H1+h)*W1+w] * delta[n];
+      int x0 = floor(x); int y0 = floor(y);
+      int x1 = x0 + 1;   int y1 = y0 + 1;
+      Dtype wx = x - x0, wy = y - y0;
+
+		Dtype dv00 = (1-wx) * (1-wy);
+		Dtype dv01 = (1-wx) * wy;
+		Dtype dv10 = wx * (1-wy);
+		Dtype dv11 = wx * wy;
+		// Backprop for bottom[0] (values)
+		addvalue(b0_diff, x0, y0, c, n, C, W0, H0, dv00 * delta[n] * top_diff[index]);
+		addvalue(b0_diff, x0, y1, c, n, C, W0, H0, dv01 * delta[n] * top_diff[index]);
+		addvalue(b0_diff, x1, y0, c, n, C, W0, H0, dv10 * delta[n] * top_diff[index]);
+		addvalue(b0_diff, x1, y1, c, n, C, W0, H0, dv11 * delta[n] * top_diff[index]);
+	}
+}
+
+template <typename Dtype>
+__global__ void RemapBackwardFlow(const int nthreads,
+const Dtype* const Vb, const Dtype* const coords, 
+const Dtype* const delta,
+const Dtype* const top_diff, Dtype* const b1_diff,
+const int C, const int H0, const int H1,
+const int W0, const int W1, bool cubic) {
+
+    // nthreads = N * H1 * W1
+	CUDA_KERNEL_LOOP(index, nthreads) {
+		const int n = index / W1 / H1;
+		const int h = (index / W1) % H1;
+		const int w = index % W1;
+
+		for ( int c = 0; c < C; c++ ) {
+			Dtype x = w + coords[((n*2+0)*H1+h)*W1+w] * delta[n];
+			Dtype y = h + coords[((n*2+1)*H1+h)*W1+w] * delta[n];
+			int x0 = floor(x); int y0 = floor(y);
+			int x1 = x0 + 1;   int y1 = y0 + 1;
+			Dtype wx = x - x0, wy = y - y0;			
+			Dtype dx, dy;
+
+			if (!cubic) {
+				Dtype v00 = getvalue(Vb, x0, y0, c, n, C, W0, H0);
+				Dtype v01 = getvalue(Vb, x0, y1, c, n, C, W0, H0);
+				Dtype v10 = getvalue(Vb, x1, y0, c, n, C, W0, H0);
+				Dtype v11 = getvalue(Vb, x1, y1, c, n, C, W0, H0);
+
+				dx = (wy-1)*v00 - wy*v01 + (1-wy)*v10 + wy*v11;
+				dy = (wx-1)*v00 - wx*v10 + (1-wx)*v01 + wx*v11;			
+			}
+			else {
+				Dtype v[4][4];
+				for (int i = -1; i <= 2; i++) {
+					for (int j = -1; j <= 2; j++)
+						v[i+1][j+1] = getvalue(Vb, x0+j, y0+i, c, n, C, W0, H0);
+				}
+				Dtype arr[4];
+				for (int i = 0; i < 4; i++)
+					arr[i] = cubicInterpolate(v[i], wx);
+
+				Dtype dvdv0 = -0.5*wy*(wy-1)*(wy-1);
+				Dtype dvdv1 = 0.5*(wy*wy*(3*wy-5))+1;
+				Dtype dvdv2 = -0.5*wy*(wy*(3*wy-4)-1);
+				Dtype dvdv3 = 0.5*wy*wy*(wy-1);
+
+				Dtype dvdx[4];
+				for (int i = 0; i < 4; i++) {
+					dvdx[i] = (v[i][2]-v[i][0])/2 + (2*v[i][0] - 5*v[i][1] + 4*v[i][2] - v[i][3])*wx 
+						+ 1.5*(-v[i][0] + 3*v[i][1] - 3*v[i][2] + v[i][3])*wx*wx;
+				}
+
+				dy = (arr[2]-arr[0])/2 + (2*arr[0] - 5*arr[1] + 4*arr[2] - arr[3])*wy 
+						+ 1.5*(-arr[0] + 3*arr[1] - 3*arr[2] + arr[3])*wy*wy;
+				dx = dvdv0*dvdx[0] + dvdv1*dvdx[1] + dvdv2*dvdx[2] + dvdv3*dvdx[3];
+				
+			}
+			// Backprop for bottom[1] (coords)
+			addvalue(b1_diff, w, h, 0, n, 2, W1, H1, dx * delta[n] * top_diff[((n*C+c)*H1+h)*W1+w]);
+			addvalue(b1_diff, w, h, 1, n, 2, W1, H1, dy * delta[n] * top_diff[((n*C+c)*H1+h)*W1+w]);
+		}
+	}
+}
+
+template <typename Dtype>
+void RemapLayer<Dtype>::Backward_gpu(const vector<Blob<Dtype>*>& top,
+    								const vector<bool>& propagate_down,
+    								const vector<Blob<Dtype>*>& bottom) {
+
+	const Dtype* Vb = bottom[0]->gpu_data();
+	const Dtype* coords = bottom[1]->gpu_data();
+	const Dtype* delta = bottom[2]->gpu_data();
+	const Dtype* top_diff = top[0]->gpu_diff();
+	Dtype* b0_diff = bottom[0]->mutable_gpu_diff();
+	Dtype* b1_diff = bottom[1]->mutable_gpu_diff();
+
+	if (propagate_down[0])
+   	caffe_gpu_set(bottom[0]->count(), Dtype(0), b0_diff);
+	if (propagate_down[1])
+		caffe_gpu_set(bottom[1]->count(), Dtype(0), b1_diff);
+	
+	int N = bottom[0]->num();
+	int C = bottom[0]->channels();
+	int W0 = bottom[0]->width();
+	int H0 = bottom[0]->height();
+	int W1 = bottom[1]->width();
+	int H1 = bottom[1]->height();
+	bool cubic = this->layer_param().remap_param().type() == RemapParameter_RemapType_CUBIC;	
+
+	if (propagate_down[0]) {
+		int count = N * C * W1 *H1;
+		RemapBackwardValue<Dtype><<<CAFFE_GET_BLOCKS(count), CAFFE_CUDA_NUM_THREADS>>>(
+      	count, coords, delta, top_diff, b0_diff, C, H0, H1, W0, W1);
+	}
+	if (propagate_down[1]) {
+		int count = N * W1 *H1;
+		RemapBackwardFlow<Dtype><<<CAFFE_GET_BLOCKS(count), CAFFE_CUDA_NUM_THREADS>>>(
+      	count, Vb, coords, delta, top_diff, b1_diff, C, H0, H1, W0, W1, cubic);
+	}
+}
+
+INSTANTIATE_LAYER_GPU_FUNCS(RemapLayer);
+
+}  // namespace caffe

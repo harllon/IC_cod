@@ -1,0 +1,719 @@
+# five input images
+input: "imLc"
+input_dim: 1 input_dim: 3 input_dim: 352 input_dim: 512
+input: "imL"
+input_dim: 1 input_dim: 3 input_dim: 352 input_dim: 512
+input: "imRc"
+input_dim: 1 input_dim: 3 input_dim: 352 input_dim: 512
+input: "imR"
+input_dim: 1 input_dim: 3 input_dim: 352 input_dim: 512
+input: "imMc"
+input_dim: 1 input_dim: 3 input_dim: 352 input_dim: 512
+
+# flows and disparities
+input: "flow_LcToMc"
+input_dim: 1 input_dim: 2 input_dim: 352 input_dim: 512
+input: "flow_RcToMc"
+input_dim: 1 input_dim: 2 input_dim: 352 input_dim: 512
+input: "disp_LToLc"
+input_dim: 1 input_dim: 1 input_dim: 352 input_dim: 512
+input: "disp_RToRc"
+input_dim: 1 input_dim: 1 input_dim: 352 input_dim: 512
+
+# temporal and angular positions
+input: "lambda"
+input_dim: 1 input_dim: 1 input_dim: 1 input_dim: 1
+input: "ang_u"
+input_dim: 1 input_dim: 1 input_dim: 1 input_dim: 1
+input: "ang_v"
+input_dim: 1 input_dim: 1 input_dim: 1 input_dim: 1
+
+layer {
+  name: "ang_u_"
+  type: "Reshape"
+  bottom: "ang_u"
+  top: "ang_u_"
+  reshape_param {
+    shape {
+      dim: -1
+    }
+  }
+}
+layer {
+  name: "ang_v_"
+  type: "Reshape"
+  bottom: "ang_v"
+  top: "ang_v_"
+  reshape_param {
+    shape {
+      dim: -1
+    }
+  }
+}
+
+## generate flow from disparity
+layer {
+  name: "Scale1"
+  type: "Scale"
+  bottom: "disp_LToLc"
+  bottom: "ang_u_"
+  top: "Scale1"
+  scale_param {
+    axis: 0
+  }
+}
+layer {
+  name: "Scale2"
+  type: "Scale"
+  bottom: "disp_LToLc"
+  bottom: "ang_v_"
+  top: "Scale2"
+  scale_param {
+    axis: 0
+  }
+}
+layer {
+  name: "flow_LToLc"
+  type: "Concat"
+  bottom: "Scale1"
+  bottom: "Scale2"
+  top: "flow_LToLc"
+}
+layer {
+  name: "Scale3"
+  type: "Scale"
+  bottom: "disp_RToRc"
+  bottom: "ang_u_"
+  top: "Scale3"
+  scale_param {
+    axis: 0
+  }
+}
+layer {
+  name: "Scale4"
+  type: "Scale"
+  bottom: "disp_RToRc"
+  bottom: "ang_v_"
+  top: "Scale4"
+  scale_param {
+    axis: 0
+  }
+}
+layer {
+  name: "flow_RToRc"
+  type: "Concat"
+  bottom: "Scale3"
+  bottom: "Scale4"
+  top: "flow_RToRc"
+}
+
+## propagate flows
+layer {
+  name: "disp_LToMc"
+  type: "Remap"
+  bottom: "disp_LToLc"
+  bottom: "flow_LcToMc"
+  top: "disp_LToMc"
+}
+layer {
+  name: "disp_RToMc"
+  type: "Remap"
+  bottom: "disp_RToRc"
+  bottom: "flow_RcToMc"
+  top: "disp_RToMc"
+}
+
+## tile lambda and omegas
+layer {
+  name: "Tile1"
+  type: "Tile"
+  bottom: "lambda"
+  top: "Tile1"
+  tile_param {
+    axis: 2
+    tiles: 352
+  }
+}
+layer {
+  name: "lambda_tile"
+  type: "Tile"
+  bottom: "Tile1"
+  top: "lambda_tile"
+  tile_param {
+    axis: 3
+    tiles: 512
+  }
+}
+layer {
+  name: "Tile2"
+  type: "Tile"
+  bottom: "ang_u"
+  top: "Tile2"
+  tile_param {
+    axis: 2
+    tiles: 352
+  }
+}
+layer {
+  name: "ang_u_tile"
+  type: "Tile"
+  bottom: "Tile2"
+  top: "ang_u_tile"
+  tile_param {
+    axis: 3
+    tiles: 512
+  }
+}
+layer {
+  name: "Tile3"
+  type: "Tile"
+  bottom: "ang_v"
+  top: "Tile3"
+  tile_param {
+    axis: 2
+    tiles: 352
+  }
+}
+layer {
+  name: "ang_v_tile"
+  type: "Tile"
+  bottom: "Tile3"
+  top: "ang_v_tile"
+  tile_param {
+    axis: 3
+    tiles: 512
+  }
+}
+
+############################ Warp flow network #########################
+layer {
+  name: "disp_LRToMc"
+  type: "Concat"
+  bottom: "disp_LToMc"
+  bottom: "disp_RToMc"
+  bottom: "lambda_tile"
+  bottom: "ang_u_tile"
+  bottom: "ang_v_tile"
+  bottom: "imMc"
+  top: "disp_LRToMc"
+}
+layer {
+  name: "Convolution132"
+  type: "Convolution"
+  bottom: "disp_LRToMc"
+  top: "Convolution132"
+  param {
+    lr_mult: 1
+    decay_mult: 1
+  }
+  param {
+    lr_mult: 2
+    decay_mult: 0
+  }
+  convolution_param {
+    num_output: 32
+    pad: 3
+    kernel_size: 7
+    weight_filler {
+      type: "msra"
+    }
+    bias_filler {
+      type: "constant"
+      value: 0
+    }
+  }
+}
+layer {
+  name: "conv1_McM"
+  type: "ReLU"
+  bottom: "Convolution132"
+  top: "Convolution132"
+}
+layer {
+  name: "Convolution133"
+  type: "Convolution"
+  bottom: "Convolution132"
+  top: "Convolution133"
+  param {
+    lr_mult: 1
+    decay_mult: 1
+  }
+  param {
+    lr_mult: 2
+    decay_mult: 0
+  }
+  convolution_param {
+    num_output: 64
+    pad: 3
+    kernel_size: 7
+    weight_filler {
+      type: "msra"
+    }
+    bias_filler {
+      type: "constant"
+      value: 0
+    }
+  }
+}
+layer {
+  name: "conv2_McM"
+  type: "ReLU"
+  bottom: "Convolution133"
+  top: "Convolution133"
+}
+layer {
+  name: "Convolution134"
+  type: "Convolution"
+  bottom: "Convolution133"
+  top: "Convolution134"
+  param {
+    lr_mult: 1
+    decay_mult: 1
+  }
+  param {
+    lr_mult: 2
+    decay_mult: 0
+  }
+  convolution_param {
+    num_output: 32
+    pad: 3
+    kernel_size: 7
+    weight_filler {
+      type: "msra"
+    }
+    bias_filler {
+      type: "constant"
+      value: 0
+    }
+  }
+}
+layer {
+  name: "conv3_McM"
+  type: "ReLU"
+  bottom: "Convolution134"
+  top: "Convolution134"
+}
+layer {
+  name: "Convolution135"
+  type: "Convolution"
+  bottom: "Convolution134"
+  top: "Convolution135"
+  param {
+    lr_mult: 1
+    decay_mult: 1
+  }
+  param {
+    lr_mult: 2
+    decay_mult: 0
+  }
+  convolution_param {
+    num_output: 16
+    pad: 3
+    kernel_size: 7
+    weight_filler {
+      type: "msra"
+    }
+    bias_filler {
+      type: "constant"
+      value: 0
+    }
+  }
+}
+layer {
+  name: "conv4_McM"
+  type: "ReLU"
+  bottom: "Convolution135"
+  top: "Convolution135"
+}
+layer {
+  name: "disp_McToM"
+  type: "Convolution"
+  bottom: "Convolution135"
+  top: "disp_McToM"
+  param {
+    lr_mult: 1
+    decay_mult: 1
+  }
+  param {
+    lr_mult: 2
+    decay_mult: 0
+  }
+  convolution_param {
+    num_output: 1
+    pad: 3
+    kernel_size: 7
+    weight_filler {
+      type: "msra"
+    }
+    bias_filler {
+      type: "constant"
+      value: 0
+    }
+  }
+}
+
+## generate flow from disparity
+layer {
+  name: "flow_McToM_x"
+  type: "Scale"
+  bottom: "disp_McToM"
+  bottom: "ang_u_"
+  top: "flow_McToM_x"
+  scale_param {
+    axis: 0
+  }
+}
+layer {
+  name: "flow_McToM_y"
+  type: "Scale"
+  bottom: "disp_McToM"
+  bottom: "ang_v_"
+  top: "flow_McToM_y"
+  scale_param {
+    axis: 0
+  }
+}
+layer {
+  name: "flow_McToM"
+  type: "Concat"
+  bottom: "flow_McToM_x"
+  bottom: "flow_McToM_y"
+  top: "flow_McToM"
+}
+
+## propagate flows
+layer {
+  name: "Remap9"
+  type: "Remap"
+  bottom: "flow_LcToMc"
+  bottom: "flow_McToM"
+  top: "Remap9"
+}
+layer {
+  name: "flow_LcToM"
+  type: "Eltwise"
+  bottom: "Remap9"
+  bottom: "flow_McToM"
+  top: "flow_LcToM"
+  eltwise_param {
+    operation: SUM
+  }
+}
+layer {
+  name: "Remap10"
+  type: "Remap"
+  bottom: "flow_LToLc"
+  bottom: "flow_LcToM"
+  top: "Remap10"
+}
+layer {
+  name: "flow_LToM"
+  type: "Eltwise"
+  bottom: "Remap10"
+  bottom: "flow_LcToM"
+  top: "flow_LToM"
+  eltwise_param {
+    operation: SUM
+  }
+}
+layer {
+  name: "Remap11"
+  type: "Remap"
+  bottom: "flow_RcToMc"
+  bottom: "flow_McToM"
+  top: "Remap11"
+}
+layer {
+  name: "flow_RcToM"
+  type: "Eltwise"
+  bottom: "Remap11"
+  bottom: "flow_McToM"
+  top: "flow_RcToM"
+  eltwise_param {
+    operation: SUM
+  }
+}
+layer {
+  name: "Remap12"
+  type: "Remap"
+  bottom: "flow_RToRc"
+  bottom: "flow_RcToM"
+  top: "Remap12"
+}
+layer {
+  name: "flow_RToM"
+  type: "Eltwise"
+  bottom: "Remap12"
+  bottom: "flow_RcToM"
+  top: "flow_RToM"
+  eltwise_param {
+    operation: SUM
+  }
+}
+
+## warp input images using the obtained flows
+layer {
+  name: "imL_warp"
+  type: "Remap"
+  bottom: "imL"
+  bottom: "flow_LToM"
+  top: "imL_warp"
+}
+layer {
+  name: "imLc_warp"
+  type: "Remap"
+  bottom: "imLc"
+  bottom: "flow_LcToM"
+  top: "imLc_warp"
+}
+layer {
+  name: "imR_warp"
+  type: "Remap"
+  bottom: "imR"
+  bottom: "flow_RToM"
+  top: "imR_warp"
+}
+layer {
+  name: "imRc_warp"
+  type: "Remap"
+  bottom: "imRc"
+  bottom: "flow_RcToM"
+  top: "imRc_warp"
+}
+layer {
+  name: "imMc_warp"
+  type: "Remap"
+  bottom: "imMc"
+  bottom: "flow_McToM"
+  top: "imMc_warp"
+}
+layer {
+  name: "flow_LToM_scaled"
+  type: "Power"
+  bottom: "flow_LToM"
+  top: "flow_LToM_scaled"
+  power_param {
+    scale: 0.015625
+  }
+}
+layer {
+  name: "flow_LcToM_scaled"
+  type: "Power"
+  bottom: "flow_LcToM"
+  top: "flow_LcToM_scaled"
+  power_param {
+    scale: 0.015625
+  }
+}
+layer {
+  name: "flow_RToM_scaled"
+  type: "Power"
+  bottom: "flow_RToM"
+  top: "flow_RToM_scaled"
+  power_param {
+    scale: 0.015625
+  }
+}
+layer {
+  name: "flow_RcToM_scaled"
+  type: "Power"
+  bottom: "flow_RcToM"
+  top: "flow_RcToM_scaled"
+  power_param {
+    scale: 0.015625
+  }
+}
+layer {
+  name: "flow_McToM_scaled"
+  type: "Power"
+  bottom: "flow_McToM"
+  top: "flow_McToM_scaled"
+  power_param {
+    scale: 0.0625
+  }
+}
+
+############################ Color network #########################
+
+layer {
+  name: "input_c"
+  type: "Concat"
+  bottom: "imL_warp"
+  bottom: "imLc_warp"
+  bottom: "imR_warp"
+  bottom: "imRc_warp"
+  bottom: "imMc_warp"
+  bottom: "flow_LToM_scaled"
+  bottom: "flow_LcToM_scaled"
+  bottom: "flow_RToM_scaled"
+  bottom: "flow_RcToM_scaled"
+  bottom: "flow_McToM_scaled"
+  bottom: "lambda_tile"
+  bottom: "ang_u_tile"
+  bottom: "ang_v_tile"
+  top: "input_c"
+}
+layer {
+  name: "Convolution136"
+  type: "Convolution"
+  bottom: "input_c"
+  top: "Convolution136"
+  param {
+    name: "conv1c_w"
+    lr_mult: 1
+    decay_mult: 1
+  }
+  param {
+    name: "con1c_b"
+    lr_mult: 2
+    decay_mult: 0
+  }
+  convolution_param {
+    num_output: 32
+    pad: 3
+    kernel_size: 7
+    weight_filler {
+      type: "msra"
+    }
+    bias_filler {
+      type: "constant"
+      value: 0
+    }
+  }
+}
+layer {
+  name: "conv1c"
+  type: "ReLU"
+  bottom: "Convolution136"
+  top: "Convolution136"
+}
+layer {
+  name: "Convolution137"
+  type: "Convolution"
+  bottom: "Convolution136"
+  top: "Convolution137"
+  param {
+    name: "conv2c_w"
+    lr_mult: 1
+    decay_mult: 1
+  }
+  param {
+    name: "con2c_b"
+    lr_mult: 2
+    decay_mult: 0
+  }
+  convolution_param {
+    num_output: 64
+    pad: 3
+    kernel_size: 7
+    weight_filler {
+      type: "msra"
+    }
+    bias_filler {
+      type: "constant"
+      value: 0
+    }
+  }
+}
+layer {
+  name: "conv2c"
+  type: "ReLU"
+  bottom: "Convolution137"
+  top: "Convolution137"
+}
+layer {
+  name: "Convolution138"
+  type: "Convolution"
+  bottom: "Convolution137"
+  top: "Convolution138"
+  param {
+    name: "conv3c_w"
+    lr_mult: 1
+    decay_mult: 1
+  }
+  param {
+    name: "con3c_b"
+    lr_mult: 2
+    decay_mult: 0
+  }
+  convolution_param {
+    num_output: 32
+    pad: 3
+    kernel_size: 7
+    weight_filler {
+      type: "msra"
+    }
+    bias_filler {
+      type: "constant"
+      value: 0
+    }
+  }
+}
+layer {
+  name: "conv3c"
+  type: "ReLU"
+  bottom: "Convolution138"
+  top: "Convolution138"
+}
+layer {
+  name: "Convolution139"
+  type: "Convolution"
+  bottom: "Convolution138"
+  top: "Convolution139"
+  param {
+    name: "conv4c_w"
+    lr_mult: 1
+    decay_mult: 1
+  }
+  param {
+    name: "con4c_b"
+    lr_mult: 2
+    decay_mult: 0
+  }
+  convolution_param {
+    num_output: 16
+    pad: 3
+    kernel_size: 7
+    weight_filler {
+      type: "msra"
+    }
+    bias_filler {
+      type: "constant"
+      value: 0
+    }
+  }
+}
+layer {
+  name: "conv4c"
+  type: "ReLU"
+  bottom: "Convolution139"
+  top: "Convolution139"
+}
+layer {
+  name: "output"
+  type: "Convolution"
+  bottom: "Convolution139"
+  top: "output"
+  param {
+    name: "conv5c_w"
+    lr_mult: 1
+    decay_mult: 1
+  }
+  param {
+    name: "conv5c_b"
+    lr_mult: 2
+    decay_mult: 0
+  }
+  convolution_param {
+    num_output: 3
+    pad: 3
+    kernel_size: 7
+    weight_filler {
+      type: "msra"
+    }
+    bias_filler {
+      type: "constant"
+      value: 0
+    }
+  }
+}

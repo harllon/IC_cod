@@ -1,0 +1,158 @@
+#include <vector>
+#include <iostream>
+#include "caffe/layers/remap_forward_layer.hpp"
+
+namespace caffe {
+
+// FIXME: needed?
+template<typename Dtype>
+void RemapForwardLayer< Dtype >::LayerSetUp(const vector< Blob< Dtype >* >& bottom,
+                                      const vector< Blob< Dtype >* >& top) {
+	// Nothing to setup for
+}
+
+template<typename Dtype>
+void RemapForwardLayer< Dtype >::Reshape(const vector< Blob< Dtype >* >& bottom,
+                                   const vector< Blob< Dtype >* >& top) {
+	CHECK_EQ(bottom[0]->num(), 
+		bottom[1]->num()) << "Remap requires num to be the same for both bottom blobs";
+	//CHECK_EQ(bottom[1]->channels(), 2) << "Remap requires coords blob (bottom[1]) to have only 2 channels";
+	top[0]->Reshape(bottom[0]->num(), bottom[0]->channels(), 
+		bottom[1]->height(), bottom[1]->width());
+
+}
+
+template<typename Dtype>
+inline Dtype getvalue(Dtype* V, int x, int y, int c, int n, int C, int W, int H) {
+	/*x = x % W;
+	x = x < 0? x + W : x;
+	y = y % H;
+	y = y < 0? y + H : y; 
+	c = c % C;
+	c = c < 0? c + C : c; */
+	if ( x < 0 || x > W - 1 || y < 0 || y > H - 1 || c < 0 || c > C - 1) 
+		return 0;	
+	return V[((n*C+c)*H+y)*W+x];
+}
+
+template<typename Dtype>
+inline void addvalue(Dtype* V, int x, int y, int c, int n, int C, int W, int H, Dtype v) {
+	if ( x < 0 || x > W - 1 || y < 0 || y > H - 1 || c < 0 || c > C - 1) 
+		return;
+	V[((n*C+c)*H+y)*W+x] += v;
+}
+
+template<typename Dtype>
+inline void setvalue(Dtype* V, int x, int y, int c, int n, int C, int W, int H, Dtype v) {
+	if ( x < 0 || x > W - 1 || y < 0 || y > H - 1 || c < 0 || c > C - 1) 
+		return;
+	V[((n*C+c)*H+y)*W+x] = v;
+}
+
+template <typename Dtype>
+void RemapForwardLayer<Dtype>::Forward_cpu(const vector<Blob<Dtype>*>& bottom,
+    								const vector<Blob<Dtype>*>& top) {
+	const Dtype* Vb = bottom[0]->cpu_data();
+	const Dtype* coords = bottom[1]->cpu_data();
+	const Dtype* delta = bottom[2]->cpu_data();
+	Dtype* Vt = top[0]->mutable_cpu_data();
+	int N  = bottom[0]->num();
+	int C  = bottom[0]->channels();	
+	int W0 = bottom[0]->width();
+	int H0 = bottom[0]->height();
+	int W1 = bottom[1]->width();
+	int H1 = bottom[1]->height();	
+
+	caffe_set(top[0]->count(), Dtype(0), Vt);
+	Dtype x, y, v;
+	int x0, y0, x1, y1;
+	for ( int n = 0; n < N; n++ ) {
+		for ( int c = 0; c < C; c++ ) {
+			for ( int h = 0; h < H1; h++ ) {
+				for ( int w = 0; w < W1; w++ ) {
+					x = w + coords[((n*2+0)*H1+h)*W1+w] * delta[n];
+					y = h + coords[((n*2+1)*H1+h)*W1+w] * delta[n];
+					x0 = floor(x);
+					y0 = floor(y);
+					x1 = x0 + 1;
+					y1 = y0 + 1;
+					v = Vb[((n*C+c)*H0+h)*W0+w];
+					if (getvalue(Vt, x0, y0, c, n, C, W1, H1) == 0) setvalue(Vt, x0, y0, c, n, C, W1, H1, v);
+					if (getvalue(Vt, x0, y1, c, n, C, W1, H1) == 0) setvalue(Vt, x0, y1, c, n, C, W1, H1, v);
+					if (getvalue(Vt, x1, y0, c, n, C, W1, H1) == 0) setvalue(Vt, x1, y0, c, n, C, W1, H1, v);
+					if (getvalue(Vt, x1, y1, c, n, C, W1, H1) == 0) setvalue(Vt, x1, y1, c, n, C, W1, H1, v);
+				}
+			}
+		}
+	} 
+}
+
+template <typename Dtype>
+void RemapForwardLayer<Dtype>::Backward_cpu(const vector<Blob<Dtype>*>& top,
+    								const vector<bool>& propagate_down,
+    								const vector<Blob<Dtype>*>& bottom) {
+
+	const Dtype* Vb = bottom[0]->cpu_data();
+	const Dtype* coords = bottom[1]->cpu_data();
+	const Dtype* delta = bottom[2]->cpu_data();
+	const Dtype* top_diff = top[0]->cpu_diff();
+
+	// FIXME: necessary?
+	if (propagate_down[0]) {
+		caffe_set(bottom[0]->count(), Dtype(0), bottom[0]->mutable_cpu_diff());
+	}
+
+	if (propagate_down[1]) {
+		caffe_set(bottom[1]->count(), Dtype(0), bottom[1]->mutable_cpu_diff());
+	}
+	
+	int N = bottom[0]->num();
+	int C = bottom[0]->channels();	
+	int W0 = bottom[0]->width();
+	int H0 = bottom[0]->height();
+	int W1 = bottom[1]->width();
+	int H1 = bottom[1]->height();
+	
+	Dtype x, y, wx, wy;
+	Dtype dx, dy, dv00, dv01, dv10, dv11, dv;
+	int x0, y0, x1, y1;
+	for ( int n = 0; n < N; n++ ) {
+		for ( int c = 0; c < C; c++ ) {
+			for ( int h = 0; h < H1; h++ ) {
+				for ( int w = 0; w < W1; w++ ) {
+               x = w + coords[((n*2+0)*H1+h)*W1+w] * delta[n];
+               y = h + coords[((n*2+1)*H1+h)*W1+w] * delta[n];
+					x0 = floor(x);
+					y0 = floor(y);
+					x1 = x0 + 1;
+					y1 = y0 + 1;
+					wx = x - x0;
+					wy = y - y0;
+					dv00 = getvalue(top_diff, x0, y0, c, n, C, W1, H1);
+					dv01 = getvalue(top_diff, x0, y1, c, n, C, W1, H1);
+					dv10 = getvalue(top_diff, x1, y0, c, n, C, W1, H1);
+					dv11 = getvalue(top_diff, x1, y1, c, n, C, W1, H1);
+					dv = (1-wx)*(1-wy)*dv00 + (1-wx)*wy*dv01 + wx*(1-wy)*dv10 + wx*wy*dv11;
+					// Gradients
+					dx = getvalue(Vb, w+1, h, c, n, C, W0, H0) - getvalue(Vb, w-1, h, c, n, C, W0, H0);
+					dy = getvalue(Vb, w, h+1, c, n, C, W0, H0) - getvalue(Vb, w, h-1, c, n, C, W0, H0);
+
+					if (propagate_down[1]) {
+						// Backprop for bottom[1] (coords)
+						Dtype* b1_diff = bottom[1]->mutable_cpu_diff();
+						addvalue(b1_diff, w, h, 0, n, 2, W1, H1, dx * delta[n] * dv);
+						addvalue(b1_diff, w, h, 1, n, 2, W1, H1, dy * delta[n] * dv);						
+					}
+				}
+			}
+		} 
+	}
+}
+
+#ifdef CPU_ONLY
+STUB_GPU(RemapForwardLayer);
+#endif
+INSTANTIATE_CLASS(RemapForwardLayer);
+REGISTER_LAYER_CLASS(RemapForward);
+
+}  // namespace caffe

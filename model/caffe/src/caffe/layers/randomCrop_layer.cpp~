@@ -1,0 +1,76 @@
+#include <algorithm>
+#include <functional>
+#include <map>
+#include <set>
+#include <vector>
+
+
+#include "caffe/layer.hpp"
+#include "caffe/layers/randomCrop_layer.hpp"
+#include "caffe/net.hpp"
+
+
+namespace caffe {
+
+template <typename Dtype>
+void RandomCropLayer<Dtype>::LayerSetUp(const vector<Blob<Dtype>*>& bottom,
+    const vector<Blob<Dtype>*>& top) { 
+	const CropParameter& param = this->layer_param_.crop_param();
+	const int crop_size = param.crop_size();
+	for (int i = 0; i < bottom.size(); i++) { 
+		CHECK_GE(bottom[i]->height(), crop_size);
+		CHECK_GE(bottom[i]->width(), crop_size);
+	}
+}
+
+template <typename Dtype>
+void RandomCropLayer<Dtype>::Reshape(const vector<Blob<Dtype>*>& bottom,
+    const vector<Blob<Dtype>*>& top) {
+   const CropParameter& param = this->layer_param_.crop_param();
+	const int crop_size = param.crop_size();
+	for (int i = 0; i < top.size(); i++) {
+		top[i]->Reshape(bottom[i]->num(), bottom[i]->channels(), 
+			crop_size, crop_size);
+	}
+}
+
+template <typename Dtype>
+void RandomCropLayer<Dtype>::Forward_cpu(const vector<Blob<Dtype>*>& bottom,
+    const vector<Blob<Dtype>*>& top) {
+	const CropParameter& param = this->layer_param_.crop_param();
+	const int crop_size = param.crop_size();
+	int N = top[0]->num();
+	int C = top[0]->channels();	
+	int W = top[0]->width();
+	int H = top[0]->height();
+
+	int h_off = Rand(H - crop_size + 1);
+   int w_off = Rand(W - crop_size + 1);
+	for (int i = 0; i < top.size(); i++) {
+		const Dtype* Vb = bottom[i]->cpu_data();
+		Dtype* Vt = top[i]->mutable_cpu_data();
+		for (int n = 0; n < N; n++) {
+			for (int c = 0; c < C; c++) {
+				for (int h = 0; h < H; h++) {
+					for (int w = 0; w < W; w++) {
+						Vt[((n*C+c)*H+h)*W+w] = Vb[((n*C+c)*H+(h+h_off))*W+(w+w_off)];
+					}
+				}
+			}
+		}
+	}
+}
+
+template <typename Dtype>
+void RandomCropLayer<Dtype>::Backward_cpu(const vector<Blob<Dtype>*>& top,
+    const vector<bool>& propagate_down, const vector<Blob<Dtype>*>& bottom) {
+}
+
+#ifdef CPU_ONLY
+STUB_GPU(RandomCropLayer);
+#endif
+
+INSTANTIATE_CLASS(RandomCropLayer);
+REGISTER_LAYER_CLASS(RandomCrop);
+
+}  // namespace caffe

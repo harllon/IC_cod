@@ -1,0 +1,123 @@
+#include <vector>
+#include <iostream>
+#include "caffe/layers/shift_layer.hpp"
+
+namespace caffe {
+
+// FIXME: needed?
+template<typename Dtype>
+void ShiftLayer< Dtype >::LayerSetUp(const vector< Blob< Dtype >* >& bottom,
+                                      const vector< Blob< Dtype >* >& top) {
+	// Nothing to setup for
+}
+
+template<typename Dtype>
+void ShiftLayer< Dtype >::Reshape(const vector< Blob< Dtype >* >& bottom,
+                                   const vector< Blob< Dtype >* >& top) {
+	const ShiftParameter& shift_param = this->layer_param_.shift_param();  
+	dim = shift_param.dim();  	
+	fixed = shift_param.fixed(); 
+	res = shift_param.res();
+	step = shift_param.step();
+
+	CHECK_EQ(bottom[0]->num(), 
+		bottom[1]->num()) << "Shift requires num to be the same for both bottom blobs";
+	//CHECK_EQ(bottom[0]->channels(), 3) << "Remap requires input blob (bottom[0]) to have only 3 channels";	
+	if (fixed == 1) {
+		top[0]->Reshape(bottom[0]->num(), 3, 
+				bottom[0]->height(), bottom[0]->width());
+	}
+	else {
+		if (dim == 1) {
+			top[0]->Reshape(bottom[0]->num(), res, 
+				bottom[0]->height(), bottom[0]->width());
+		}
+		else {
+			top[0]->Reshape(bottom[0]->num(), 1, 
+				bottom[0]->height()*res, bottom[0]->width()*res);
+			//top[0]->Reshape(bottom[0]->num(), res*res, 
+			//	bottom[0]->height(), bottom[0]->width());	
+		}
+	}
+}
+
+template<typename Dtype>
+inline Dtype getvalue(Dtype* V, int x, int y, int c, int n, int C, int W, int H) {
+	/*x = x % W;
+	x = x < 0? x + W : x;
+	y = y % H;
+	y = y < 0? y + H : y; 
+	c = c % C;
+	c = c < 0? c + C : c; */
+	if ( x < 0 || x > W - 1 || y < 0 || y > H - 1 || c < 0 || c > C - 1) 
+		return 0;	
+	return V[((n*C+c)*H+y)*W+x];
+}
+
+template<typename Dtype>
+inline void addvalue(Dtype* V, int x, int y, int c, int n, int C, int W, int H, Dtype v) {
+	if ( x < 0 || x > W - 1 || y < 0 || y > H - 1 || c < 0 || c > C - 1) 
+		return;
+	V[((n*C+c)*H+y)*W+x] += v;
+}
+
+template <typename Dtype>
+void ShiftLayer<Dtype>::Forward_cpu(const vector<Blob<Dtype>*>& bottom,
+    								const vector<Blob<Dtype>*>& top) {
+	const Dtype* Vb = bottom[0]->cpu_data();
+	const Dtype* delta = bottom[1]->cpu_data();
+	Dtype* Vt = top[0]->mutable_cpu_data();
+	caffe_set(top[0]->count(), Dtype(0), top[0]->mutable_cpu_data());
+	int N  = bottom[0]->num();
+	int C  = bottom[0]->channels();	
+	int W0 = bottom[0]->width();
+	int H0 = bottom[0]->height();
+	int W1 = bottom[1]->width();
+	int H1 = bottom[1]->height();	
+	Dtype x, y, wx, wy, w00, w01, w10, w11, v00, v01, v10, v11;
+	int x0, y0, x1, y1;
+	Dtype rgb2gray[3] = { 0.2989, 0.5870, 0.1140 };
+	for ( int n = 0; n < N; n++ ) {
+		for ( int c = 0; c < C; c++ ) {
+			for ( int shiftY_idx = 0; shiftY_idx < res; shiftY_idx++ ) {
+				for ( int shiftX_idx = 0; shiftX_idx < res; shiftX_idx++ ) {				
+					Dtype shiftX = shiftX_idx * step - Dtype(res-1)/2*step;
+					Dtype shiftY = shiftY_idx * step - Dtype(res-1)/2*step;
+					for ( int h = 0; h < H1; h++ ) {
+						for ( int w = 0; w < W1; w++ ) {
+							x = w + shiftX * delta[n];
+							y = h + shiftY * delta[n];
+							x0 = floor(x); y0 = floor(y);
+							x1 = x0 + 1;   y1 = y0 + 1;
+							wx = x - x0;   wy = y - y0;
+							w00 = (1 - wx) * (1 - wy);
+							w01 = (1 - wx) * wy;
+							w10 = wx * (1 - wy);
+							w11 = wx * wy;
+							v00 = getvalue(Vb, x0, y0, c, n, C, W0, H0);
+							v01 = getvalue(Vb, x0, y1, c, n, C, W0, H0);
+							v10 = getvalue(Vb, x1, y0, c, n, C, W0, H0);
+							v11 = getvalue(Vb, x1, y1, c, n, C, W0, H0);
+							int idx = ((n*res*res+(shiftY_idx*res+shiftX_idx))*H1+h)*W1+w;
+							Vt[idx] += rgb2gray[c] * (w00 * v00 + w01 * v01 + w10 * v10 + w11 * v11);
+						}
+					}
+				}
+			}
+		}
+	} 
+}
+
+template <typename Dtype>
+void ShiftLayer<Dtype>::Backward_cpu(const vector<Blob<Dtype>*>& top,
+    								const vector<bool>& propagate_down,
+    								const vector<Blob<Dtype>*>& bottom) {	
+}
+
+#ifdef CPU_ONLY
+STUB_GPU(ShiftLayer);
+#endif
+INSTANTIATE_CLASS(ShiftLayer);
+REGISTER_LAYER_CLASS(Shift);
+
+}  // namespace caffe

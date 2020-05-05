@@ -1,0 +1,158 @@
+#include <vector>
+#include <iostream>
+#include "caffe/layers/shift_layer.hpp"
+
+namespace caffe {
+
+template<typename Dtype>
+__device__ inline Dtype getvalue(Dtype* V, int x, int y, int c, int n, int C, int W, int H) {
+	if ( x < 0 || x > W - 1 || y < 0 || y > H - 1 || c < 0 || c > C - 1) 
+		return 0;	
+	return V[((n*C+c)*H+y)*W+x];
+}
+
+template<typename Dtype>
+__device__ inline void addvalue(Dtype* V, int x, int y, int c, int n, int C, int W, int H, Dtype v) {
+	if ( x < 0 || x > W - 1 || y < 0 || y > H - 1 || c < 0 || c > C - 1) 
+		return;
+	V[((n*C+c)*H+y)*W+x] += v;
+}
+
+
+template <typename Dtype>
+__global__ void ShiftForward(const int nthreads,
+	const Dtype* const Vb, const Dtype* const delta, 
+	const Dtype* const omega_x, const Dtype* const omega_y, 
+	Dtype* const Vt, const int C, const int H, const int W,
+	const int dim, const int res, const float step) {
+    
+   // nthreads = N * res^2 * H1 * W1
+	CUDA_KERNEL_LOOP(index, nthreads) {
+		const int n = dim == 1? index / W / H / res : index / W / H / (res*res);
+		const int s = dim == 1? (index / W / H) % res : (index / W / H) % (res*res);
+		const int h = (index / W) % H;
+		const int w = index % W;
+		
+		Dtype shiftY, shiftX;
+		int v = (s / res), u = (s % res);
+		if (dim == 1) {
+			shiftY = (s - Dtype(res-1)/2) * omega_y[n] * step;
+			shiftX = (s - Dtype(res-1)/2) * omega_x[n] * step;
+		}
+		else {			
+			shiftY = (v - Dtype(res-1)/2) * step;
+			shiftX = (u - Dtype(res-1)/2) * step;
+		}
+		Dtype x = w + shiftX * delta[n];
+		Dtype y = h + shiftY * delta[n];
+		int x0 = floor(x); int x1 = x0 + 1; Dtype wx = x - x0;
+		int y0 = floor(y); int y1 = y0 + 1; Dtype wy = y - y0;		
+		Dtype w00 = (1 - wx) * (1 - wy), w01 = (1 - wx) * wy, w10 = wx * (1 - wy), w11 = wx * wy;
+				
+		Dtype rgb2gray[3] = { 0.2989, 0.5870, 0.1140 };
+		for (int c = 0; c < C; c++) {
+			Dtype v00 = getvalue(Vb, x0, y0, c, n, C, W, H);
+			Dtype v01 = getvalue(Vb, x0, y1, c, n, C, W, H);
+			Dtype v10 = getvalue(Vb, x1, y0, c, n, C, W, H);
+			Dtype v11 = getvalue(Vb, x1, y1, c, n, C, W, H);	
+			Dtype weight = C == 3? rgb2gray[c] : 1;
+			//if (dim == 1)
+				Vt[index] += weight * (w00 * v00 + w01 * v01 + w10 * v10 + w11 * v11);
+			//else 	
+				//Vt[(((n*H+h)*res+v)*W+w)*res+u] += weight * (w00 * v00 + w01 * v01 + w10 * v10 + w11 * v11);
+		}
+	} 
+}
+
+// shift by a constant amount
+template <typename Dtype>
+__global__ void ShiftForwardConst(const int nthreads,
+	const Dtype* const Vb, const Dtype* const shiftAmount, const Dtype* const delta, 
+	Dtype* const Vt, const int C, const int H, const int W) {
+    
+   // nthreads = N * C * H1 * W1
+	CUDA_KERNEL_LOOP(index, nthreads) {
+		const int n = index / W / H / C;
+		const int c = (index / W / H) % C;
+		const int h = (index / W) % H;
+		const int w = index % W;
+							
+		Dtype	shiftX = shiftAmount[((n*2+0)*H+h)*W+w] * delta[n];
+		Dtype	shiftY = shiftAmount[((n*2+1)*H+h)*W+w] * delta[n];	
+		Dtype x = w + shiftX;
+		Dtype y = h + shiftY;
+		Vt[index] = getvalue(Vb, x, y, c, n, C, W, H);
+	} 
+}
+
+template <typename Dtype>
+__global__ void ShiftForwardUnidir(const int nthreads,
+	const Dtype* const Vb, Dtype* const Vt, 
+	const int C, const int H, const int W,
+	const int res, const float step) {
+    
+   // nthreads = N * res * H * W
+	CUDA_KERNEL_LOOP(index, nthreads) {
+		const int n = index / W / H / res;
+		const int s = (index / W / H) % res;
+		const int h = (index / W) % H;
+		const int w = index % W;
+		
+		Dtype shiftY = (s - (res-1)) * step;				
+		Dtype rgb2gray[3] = { 0.2989, 0.5870, 0.1140 };
+		for (int c = 0; c < C; c++) {
+			Dtype v = getvalue(Vb, w, h+shiftY, c, n, C, W, H);
+			Dtype weight = C == 3? rgb2gray[c] : 1;
+			Vt[index] += weight * v;
+		}
+	} 
+}
+
+template <typename Dtype>
+void ShiftLayer<Dtype>::Forward_gpu(const vector<Blob<Dtype>*>& bottom,
+    								const vector<Blob<Dtype>*>& top) {
+	const Dtype* Vb = bottom[0]->gpu_data();
+	const Dtype* delta = bottom[1]->gpu_data();
+	const Dtype* omega_x, *omega_y, *shiftAmount;
+	if (bottom.size() > 3) {
+		omega_x = bottom[2]->gpu_data();
+		omega_y = bottom[3]->gpu_data();
+	}
+	else if (bottom.size() > 2) {
+		shiftAmount = bottom[2]->gpu_data();
+	}
+	Dtype* Vt = top[0]->mutable_gpu_data();
+	int N  = bottom[0]->num();
+	int C  = bottom[0]->channels();
+	int W = bottom[0]->width();
+	int H = bottom[0]->height();
+
+	if (fixed == 0) {
+		caffe_gpu_set(top[0]->count(), Dtype(0), Vt);
+		int count = dim == 1? (N * res * H * W) : (N * (res*res) * H * W);
+		ShiftForward<Dtype><<<CAFFE_GET_BLOCKS(count), CAFFE_CUDA_NUM_THREADS>>>(
+		     count, Vb, delta, omega_x, omega_y, Vt, C, H, W, dim, res, step);
+	}
+	else if (fixed == 1) {
+		int count = N * C * H * W;
+		ShiftForwardConst<Dtype><<<CAFFE_GET_BLOCKS(count), CAFFE_CUDA_NUM_THREADS>>>(
+		     count, Vb, shiftAmount, delta, Vt, C, H, W);
+	}
+	else {
+		caffe_gpu_set(top[0]->count(), Dtype(0), Vt);
+		int count = N * res * H * W;
+		ShiftForwardUnidir<Dtype><<<CAFFE_GET_BLOCKS(count), CAFFE_CUDA_NUM_THREADS>>>(
+		     count, Vb, Vt, delta, C, H, W, res, step);
+	}
+}
+
+template <typename Dtype>
+void ShiftLayer<Dtype>::Backward_gpu(const vector<Blob<Dtype>*>& top,
+    								const vector<bool>& propagate_down,
+    								const vector<Blob<Dtype>*>& bottom) {
+
+}
+
+INSTANTIATE_LAYER_GPU_FUNCS(ShiftLayer);
+
+}  // namespace caffe
