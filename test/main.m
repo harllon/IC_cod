@@ -6,7 +6,7 @@ init();                         % parameter initialization
 
 %% read in LF images
 
-file_path = 'data/seq02';
+file_path = 'data/seq01';
 video = readLFImg(file_path);   % LF ground truth video
 T = size(video, 6)-1;           % temporal upsampling factor
 global parameters;
